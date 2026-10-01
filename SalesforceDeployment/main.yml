@@ -1,0 +1,97 @@
+
+name: Prod Deployment
+on:
+    pull_request:
+      branches:
+        - main  # Trigger only on PR merging into the Prod branch
+      types:
+        - closed  # Trigger only when the PR is closed (merged or rejected)
+      
+jobs:
+  deploy_to_prod:
+    if: github.event.pull_request.merged == true && !startsWith(github.head_ref, 'revert')
+    #runs-on: ubuntu-latest <<github managed
+    runs-on: [self-hosted] #customer managed
+    timeout-minutes: 110  # Extended timeout for long test runs
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          
+      - name: Install Salesforce CLI
+        run: |
+         rm -rf $HOME/sf
+
+         npm cache clean --force
+         npm install --prefix $HOME/sf -g @salesforce/cli@latest
+         echo "$HOME/sf/bin" >> $GITHUB_PATH
+         export PATH="$HOME/sf/bin:$PATH"
+    
+         sf version
+         sf plugins --core    
+   
+      - name: Authenticate with Salesforce Production
+        run: |
+          export TARGET_ORG=Production
+          echo "${{ secrets.PROD_SERVER_KEY_CREDENTALS_BASE64 }}" | base64 --decode > /tmp/decoded_key.pem
+          sf org login jwt --instance-url ${{ secrets.PROD_SF_INSTANCE_URL }} \
+                            --client-id ${{ secrets.PROD_SF_CONSUMER_KEY }} \
+                            --username ${{ secrets.PROD_SF_USERNAME }} \
+                            --jwt-key-file /tmp/decoded_key.pem \
+                            --set-default-dev-hub --alias $TARGET_ORG
+
+      - name: Abort if No Manifest Files Present
+        run: |
+          echo "Checking for manifest/package.xml or destructiveChangesPost.xml..."
+          if [ ! -s manifest/package.xml ] && [ ! -s manifest/destructiveChangesPost.xml ]; then
+            echo "No manifest files detected. Skipping deployment."
+            exit 1
+          fi
+
+      - name: Deploy to Salesforce Prod
+        run: |
+          set -e  # Ensure script exits early on any failure
+          
+          export TARGET_ORG=Production
+          DEPLOY_TYPE="Standard"
+          
+          # Check deployment type:
+          echo "Checking for destructiveChangesPost.xml..." 
+          if [ -f manifest/destructiveChangesPost.xml ] && [ -s manifest/destructiveChangesPost.xml ]; then
+            echo "Found destructiveChangesPost.xml. Checking for valid members..." 
+            
+            if grep -q "<members>" manifest/destructiveChangesPost.xml; then
+              echo "Valid destructive changes detected in destructiveChangesPost.xml." 
+              DEPLOY_TYPE="Destructive"
+            else
+              echo "No valid destructive changes (<members>) detected in destructiveChangesPost.xml." 
+            fi
+          else
+            echo "No destructiveChangesPost.xml file found or it's empty." 
+          fi
+          if [ "$DEPLOY_TYPE" == "Destructive" ]; then
+            echo "Skipping standard deployment, as destructive changes were detected." 
+          else
+            echo "Checking for package.xml..." 
+            if [ -f manifest/package.xml ] && [ -s manifest/package.xml ]; then
+              echo "Found package.xml." 
+              DEPLOY_TYPE="Standard"
+            else
+              echo "No package.xml file found or it's empty." 
+            fi
+          fi
+          # Standard deployment logic:
+          if [ "$DEPLOY_TYPE" == "Standard" ]; then
+            echo "Initiating a standard deployment..." 
+            sf project deploy start --manifest manifest/package.xml --ignore-conflicts --test-level RunLocalTests --target-org ${TARGET_ORG} --wait 110 
+          fi
+          # Destructive deployment logic:
+          if [ "$DEPLOY_TYPE" == "Destructive" ]; then
+            echo "Initiating a destructive changes deployment..." 
+            sf project deploy start --manifest manifest/package.xml --ignore-conflicts --post-destructive-changes manifest/destructiveChangesPost.xml --target-org ${TARGET_ORG} --wait 110 
+          fi
+          
