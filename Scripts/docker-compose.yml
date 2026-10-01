@@ -1,0 +1,13 @@
+services:
+  runner:
+    image: rg_name:latest #rg_name is the repo you've created in ECR
+    restart: always
+    environment:
+      - REPO=OrgName/RepoName
+      - REG_TOKEN=${REG_TOKEN}
+      - NAME=rg_name
+      - LABEL=rg_name
+    cpus: '0.5'
+    mem_limit: 512M
+    labels:
+      runner: rg_name
